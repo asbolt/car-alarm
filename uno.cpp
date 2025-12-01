@@ -1,17 +1,24 @@
 #include <LiquidCrystal.h>
+#include <Wire.h>
+#include "RTClib.h"
 
 // LCD дисплей
 LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
+// RTC модуль
+RTC_DS1307 rtc;
+
 // Кнопки на шилде
 #define BTN_ANALOG A0
 
-// Переменные времени (эмулируем RTC)
-int currentHour = 10;
-int currentMinute = 0;
-int currentSecond = 0;
+// Пин для управления Nano
+#define NANO_CONTROL_PIN 3
 
-// Будильник
+// Зуммер и светодиоды
+#define BUZZER_PIN 11
+#define LED_PIN 12
+
+// Константы
 int alarmHour = 10;
 int alarmMinute = 1;
 bool alarmEnabled = true;
@@ -19,56 +26,88 @@ bool settingMode = false;
 int settingStep = 0;
 bool isAlarmTriggered = false;
 
+unsigned long lastBlinkTime = 0;
+unsigned long lastBuzzerTime = 0;
+bool ledState = false;
+bool buzzerState = false;
+const unsigned long BLINK_INTERVAL = 500;
+const unsigned long BUZZER_INTERVAL = 300;
+
 void setup() {
   // Инициализация LCD
   lcd.begin(16, 2);
   lcd.print("Robot Alarm");
   lcd.setCursor(0, 1);
-  lcd.print("RTC Disabled");
+  lcd.print("Initializing RTC");
+  Wire.begin();
+  
+  // Инициализация RTC
+  if (!rtc.begin()) {
+    lcd.clear();
+    lcd.print("RTC not found!");
+    while (1);
+  }
+  
+  // Настройка пина для управления Nano
+  pinMode(NANO_CONTROL_PIN, OUTPUT);
+  digitalWrite(NANO_CONTROL_PIN, HIGH);
+  
+  // Настройка зуммера и светодиодов
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(LED_PIN, LOW);
   
   delay(2000);
-  
-  // Настройка Serial для связи с Nano
-  Serial.begin(9600);
+  lcd.clear();
 }
 
 void loop() {
-  // Эмуляция времени (вместо RTC)
-  updateTime();
+  // Получение реального времени с RTC
+  DateTime now = rtc.now();
   
   // Обработка кнопок
   handleButtons();
   
+  // Управление светодиодами и зуммером при срабатывании будильника
+  handleAlarmEffects();
+  
   // Отображение информации
-  updateDisplay();
+  updateDisplay(now);
   
   // Проверка будильника
   if (alarmEnabled && !isAlarmTriggered && 
-      currentHour == alarmHour && 
-      currentMinute == alarmMinute &&
-      currentSecond == 0) {
+      now.hour() == alarmHour && 
+      now.minute() == alarmMinute &&
+      now.second() == 0) {
     triggerAlarm();
   }
   
   delay(200);
 }
 
-void updateTime() {
-  static unsigned long lastTimeUpdate = 0;
-  if (millis() - lastTimeUpdate > 1000) {
-    currentSecond++;
-    if (currentSecond >= 60) {
-      currentSecond = 0;
-      currentMinute++;
-      if (currentMinute >= 60) {
-        currentMinute = 0;
-        currentHour++;
-        if (currentHour >= 24) {
-          currentHour = 0;
-        }
-      }
+void handleAlarmEffects() {
+  if (isAlarmTriggered) {
+    unsigned long currentTime = millis();
+    
+    // Мигание светодиодов
+    if (currentTime - lastBlinkTime >= BLINK_INTERVAL) {
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+      lastBlinkTime = currentTime;
     }
-    lastTimeUpdate = millis();
+    
+    // Пропикивание зуммером
+    if (currentTime - lastBuzzerTime >= BUZZER_INTERVAL) {
+      buzzerState = !buzzerState;
+      if (buzzerState) {
+        tone(BUZZER_PIN, 1000, 200);
+      }
+      lastBuzzerTime = currentTime;
+    }
+  } else {
+    digitalWrite(LED_PIN, LOW);
+    noTone(BUZZER_PIN);
   }
 }
 
@@ -121,7 +160,7 @@ void handleButtons() {
   }
 }
 
-void updateDisplay() {
+void updateDisplay(DateTime now) {
   lcd.clear();
   
   if (settingMode) {
@@ -135,13 +174,13 @@ void updateDisplay() {
   } else if (isAlarmTriggered) {
     lcd.print("ALARM ACTIVE!");
     lcd.setCursor(0, 1);
-    lcd.print("Press R/L to stop");
+    lcd.print("Pres R/L to stop");
   } else {
-    // Обычный режим
+    // Обычный режим с реальным временем (без секунд)
     lcd.print("Time: ");
-    printTwoDigits(currentHour);
+    printTwoDigits(now.hour());
     lcd.print(":");
-    printTwoDigits(currentMinute);
+    printTwoDigits(now.minute());
     
     lcd.setCursor(0, 1);
     lcd.print("Alarm: ");
@@ -159,12 +198,16 @@ void printTwoDigits(int number) {
 
 void triggerAlarm() {
   isAlarmTriggered = true;
-  Serial.write('S');
+  digitalWrite(NANO_CONTROL_PIN, LOW);
+  Serial.println("ALARM: Машинка запущена!");
 }
 
 void stopAlarm() {
   if (isAlarmTriggered) {
     isAlarmTriggered = false;
-    Serial.write('T');
+    digitalWrite(NANO_CONTROL_PIN, HIGH);
+    digitalWrite(LED_PIN, LOW);
+    noTone(BUZZER_PIN);
+    Serial.println("ALARM STOP: Все системы выключены");
   }
 }

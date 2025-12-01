@@ -1,254 +1,256 @@
-// ПЕРЕМЕННЫЕ
+// Драйвер мотора - задние колеса
+#define MOTOR_IN1 4  
+#define MOTOR_IN2 5    
 
-// Драйвер мотора
-#define MOTOR_IN1 8  // ПИНЫ НЕТОЧНЫЕ 
-#define MOTOR_IN2 9    
-// ENA подключаем напрямую к +5V (для максимальной скорости)
+// Драйвер сервопривода - передние колеса
+#define SERVO_IN3 2  
+#define SERVO_IN4 3
 
-// Сервопривод для поворота передних колес
-#define STEERING_SERVO 3  
+// Дальнометры
+#define TRIG_PIN 6  
+#define ECHO_PIN_LEFT 8  
+#define ECHO_PIN_RIGHT 7
 
-// Дальнометр (возможны траблы, тк не знаю модель)
-#define TRIG_PIN 11  
-#define ECHO_PIN 12  
+// Пин для приема команд от Arduino Uno
+#define COMMAND_PIN 12
+
+// Константы
 #define MAX_DISTANCE 200
+#define OBSTACLE_DISTANCE 25
+#define AVOID_TIME 1000
+#define BACKUP_TIME 300
 
-// Светодиоды
-#define LED1 2     
-#define LED2 4     
-#define LED3 5     
-#define LED4 6     
-
-// Зуммер
-#define BUZZER 7     
-
+int steeringAngle = 90;
 bool isActive = false;
-unsigned long alarmTime = 0;
-const unsigned long ALARM_DURATION = 300000; // 5 минут
+unsigned long alarmStartTime = 0;
+const unsigned long ALARM_DURATION = 300000; 
+unsigned long lastRandomTurn = 0;
+const unsigned long RANDOM_TURN_INTERVAL = 3000;
 
-int steeringAngle = 90;      // Угол сервопривода (90 - прямо) - ЭТО НУЖНО ПРОВЕРЯТЬ ПРИ ЗАПУСКЕ, ВОЗМОЖНО ТАМ ДРУГОЕ ЗНАЧЕНИЕ
+// Переменные для обработки сигнала
+bool lastCommandState = HIGH;
+bool currentCommandState = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_DELAY = 50;
 
-// ФУНКЦИИ ДЛЯ ДРАЙВЕРА
-
-void setupMotor() 
-{
-    pinMode(MOTOR_IN1, OUTPUT);
-    pinMode(MOTOR_IN2, OUTPUT);
+void setup() {
+  // Настройка драйвера мотора
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
   
-    digitalWrite(MOTOR_IN1, LOW);
-    digitalWrite(MOTOR_IN2, LOW);
-}
-
-void moveForward() {
-    digitalWrite(MOTOR_IN1, HIGH);
-    digitalWrite(MOTOR_IN2, LOW);
-}
-
-void moveBackward() {
-    digitalWrite(MOTOR_IN1, LOW);
-    digitalWrite(MOTOR_IN2, HIGH);
-}
-
-void stopMoving() {
-    digitalWrite(MOTOR_IN1, LOW);
-    digitalWrite(MOTOR_IN2, LOW);
-}
-
-// ФУНКЦИИ ДЛЯ СЕРВОПРИВОДА
-
-void setupServo() {
-    pinMode(STEERING_SERVO, OUTPUT);
-}
-
-void setSteering(int angle) {
-  // angle: 0-180, где 90 - прямо, <90 - влево, >90 - вправо
-  int pulseWidth = map(angle, 0, 180, 500, 2400);
+  // Настройка сервопривода
+  pinMode(SERVO_IN3, OUTPUT);
+  pinMode(SERVO_IN4, OUTPUT);
   
-  digitalWrite(STEERING_SERVO, HIGH);
-  delayMicroseconds(pulseWidth);
-  digitalWrite(STEERING_SERVO, LOW);
-  delay(20); // нужно для стабильной работы (на +- 50 Hz)
+  // Настройка дальнометров
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN_LEFT, INPUT);
+  pinMode(ECHO_PIN_RIGHT, INPUT);
   
-  steeringAngle = angle;
+  // Настройка пина для команд от Uno
+  pinMode(COMMAND_PIN, INPUT_PULLUP);
+  
+  // Начальная позиция - прямо
+  setSteering(90);
+  stopMoving();
 }
 
-// ФУНКЦИИ ДЛЯ ДАЛЬНОМЕТРА
+void loop() {
+  // Проверка команды от Arduino Uno
+  checkCommand();
+  
+  if (isActive) {
+    // Проверка времени работы будильника
+    if (millis() - alarmStartTime > ALARM_DURATION) {
+      stopAlarm();
+      return;
+    }
+    
+    int leftDist, rightDist;
+    checkDistances(leftDist, rightDist);
+    
+    // Объезд препятствий
+    avoidObstacles(leftDist, rightDist);
+    
+  }
+  
+  delay(50);
+}
 
-int checkDistance() {
+void checkCommand() {
+  bool reading = digitalRead(COMMAND_PIN);
+  
+  // Если состояние изменилось
+  if (reading != lastCommandState) {
+    lastDebounceTime = millis();
+  }
+  
+  // Если прошло достаточно времени после последнего изменения
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    // Если состояние стабилизировалось и отличается от текущего
+    if (reading != currentCommandState) {
+      currentCommandState = reading;
+      
+      // Обработка команды
+      if (currentCommandState == LOW) {
+        // Сигнал LOW - активировать будильник
+        if (!isActive) {
+          startAlarm();
+        }
+      } else {
+        // Сигнал HIGH - деактивировать будильник
+        if (isActive) {
+          stopAlarm();
+        }
+      }
+    }
+  }
+  
+  lastCommandState = reading;
+}
+
+// ФУНКЦИИ ДЛЯ ДАЛЬНОМЕТРОВ
+void checkDistances(int &leftDistance, int &rightDistance) {
+  leftDistance = getDistance(ECHO_PIN_LEFT);
+  delay(10);
+  rightDistance = getDistance(ECHO_PIN_RIGHT);
+}
+
+int getDistance(int echoPin) {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
   
-  long duration = pulseIn(ECHO_PIN, HIGH);
+  long duration = pulseIn(echoPin, HIGH);
   int distance = duration * 0.034 / 2;
   
   if (distance > MAX_DISTANCE || distance <= 0) {
-    return 0;
+    return MAX_DISTANCE;
   }
   return distance;
 }
 
-// ОСНОВНОЙ КОД
-
-void setup() {
-  // Настройка драйвера мотора
-  setupMotor();
-  
-  // Настройка сервопривода
-  setupServo();
-  
-  // Настройка светодиодов и зуммера
-  pinMode(LED1, OUTPUT);
-  pinMode(LED2, OUTPUT);
-  pinMode(LED3, OUTPUT);
-  pinMode(LED4, OUTPUT);
-  pinMode(BUZZER, OUTPUT);
-  
-  // Настройка дальнометра
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  
-  // Устанавливаем прямолинейное движение и остановку
-  setSteering(90);
-  stopMoving();
-  
-  // Инициализация Serial для связи с Uno
-  Serial.begin(9600);
-}
-
-void loop() {
-  // Проверка команды от Arduino Uno
-  if (Serial.available() > 0) {
-    char command = Serial.read();
-    if (command == 'S') {
-      isActive = true;
-      alarmTime = millis();
-      startAlarm();
-    } else if (command == 'T') {
-      isActive = false;
-      stopAlarm();
-    }
-  }
-  
-  if (isActive) {
-    // Проверка времени работы
-    if (millis() - alarmTime > ALARM_DURATION) {
-      isActive = false;
-      stopAlarm();
-      return;
-    }
-    
-    // Основная логика движения
-    int distance = checkDistance();
-    
-    if (distance > 25 || distance == 0) {
-      // Нет препятствий - едем вперед со случайными поворотами
-      moveForward();
-      randomSteering();
-    } else {
-      // Препятствие обнаружено - объезжаем
-      avoidObstacle();
-    }
-    
-    // Мигание светодиодов и звук
-    blinkLights();
-    playBuzzer();
-    
-  } else {
-    stopAlarm(); 
-  }
-  
-  delay(100);
-}
-
-// ДВИЖЕНИЕ
-
+// ФУНКЦИИ ДЛЯ ДВИЖЕНИЯ
 void startAlarm() {
+  isActive = true;
+  alarmStartTime = millis();
+  setSteering(90);
   moveForward();
-  setSteering(90); // Начинаем движение прямо
 }
 
 void stopAlarm() {
+  isActive = false;
   stopMoving();
-  setSteering(90); // Возвращаем колеса прямо
-  turnOffLights();
-  noTone(BUZZER);
+  setSteering(90);
 }
 
-void randomSteering() {
-  // Случайные повороты каждые 3 секунды
-  if (millis() % 3000 < 100) {
-    // Случайный угол между 60 и 120 градусами
-    steeringAngle = random(60, 121);
-    setSteering(steeringAngle);
+void moveForward() {
+  digitalWrite(MOTOR_IN1, HIGH);
+  digitalWrite(MOTOR_IN2, LOW);
+}
+
+void moveBackward() {
+  digitalWrite(MOTOR_IN1, LOW);
+  digitalWrite(MOTOR_IN2, HIGH);
+}
+
+void stopMoving() {
+  digitalWrite(MOTOR_IN1, LOW);
+  digitalWrite(MOTOR_IN2, LOW);
+}
+
+// ФУНКЦИИ ДЛЯ РУЛЕВОГО УПРАВЛЕНИЯ
+void setSteering(int angle) {
+  
+  if (angle < 90) {
+    // Поворот влево
+    digitalWrite(SERVO_IN3, HIGH);
+    digitalWrite(SERVO_IN4, LOW);
+    delay(map(angle, 0, 89, 50, 5));
+  } else if (angle > 90) {
+    // Поворот вправо
+    digitalWrite(SERVO_IN3, LOW);
+    digitalWrite(SERVO_IN4, HIGH);
+    delay(map(angle, 91, 180, 5, 50));
+  } else {
+    // Прямо - остановка
+    digitalWrite(SERVO_IN3, LOW);
+    digitalWrite(SERVO_IN4, LOW);
+  }
+  
+  steeringAngle = angle;
+  delay(10);
+}
+
+// ЛОГИКА ОБЪЕЗДА ПРЕПЯТСТВИЙ
+void avoidObstacles(int leftDist, int rightDist) {
+  // Если нет препятствий - едем вперед со случайными поворотами
+  if (leftDist > OBSTACLE_DISTANCE && rightDist > OBSTACLE_DISTANCE) {
+    moveForward();
+    randomSteering();
+  }
+  // Препятствие слева - поворачиваем направо
+  else if (leftDist <= OBSTACLE_DISTANCE && rightDist > OBSTACLE_DISTANCE) {
+    avoidRight();
+  }
+  // Препятствие справа - поворачиваем налево
+  else if (rightDist <= OBSTACLE_DISTANCE && leftDist > OBSTACLE_DISTANCE) {
+    avoidLeft();
+  }
+  // Препятствие прямо - выбираем лучшее направление
+  else if (leftDist <= OBSTACLE_DISTANCE && rightDist <= OBSTACLE_DISTANCE) {
+    avoidObstacleAhead(leftDist, rightDist);
   }
 }
 
-void avoidObstacle() {
+void randomSteering() {
+  if (millis() - lastRandomTurn > RANDOM_TURN_INTERVAL) {
+    int randomAngle = random(60, 121); // от 60 до 120 градусов
+    setSteering(randomAngle);
+    lastRandomTurn = millis();
+  }
+}
+
+void avoidLeft() {
+  setSteering(60); // Резко налево
+  moveForward();
+  delay(AVOID_TIME);
+  setSteering(90); // Возвращаем прямо
+}
+
+void avoidRight() {
+  setSteering(120); // Резко направо
+  moveForward();
+  delay(AVOID_TIME);
+  setSteering(90); // Возвращаем прямо
+}
+
+void avoidObstacleAhead(int leftDist, int rightDist) {
+  
   // 1. Останавливаемся
   stopMoving();
   delay(500);
   
   // 2. Немного сдаем назад
-  setSteering(90); // Прямо назад
+  setSteering(90);
   moveBackward();
-  delay(300);
+  delay(BACKUP_TIME);
   stopMoving();
   delay(200);
   
-  // 3. Выбираем направление для объезда
-  if (random(0, 2) == 0) {
-    // Поворот налево
-    setSteering(60); // Резко налево
+  // 3. Выбираем направление с большим пространством
+  if (leftDist > rightDist) {
+    setSteering(45); // Резко налево
     moveForward();
-    delay(800); // Едем с поворотом
+    delay(AVOID_TIME * 1.5);
   } else {
-    // Поворот направо
-    setSteering(120); // Резко направо
+    setSteering(135); // Резко направо
     moveForward();
-    delay(800); // Едем с поворотом
+    delay(AVOID_TIME * 1.5);
   }
   
   // 4. Возвращаемся к прямолинейному движению
   setSteering(90);
-}
-
-// СВЕТ И ЗВУК
-
-void blinkLights() {
-  static unsigned long lastBlink = 0;
-  static bool lightsOn = false;
-  
-  if (millis() - lastBlink > 300) {
-    lightsOn = !lightsOn;
-    digitalWrite(LED1, lightsOn);
-    digitalWrite(LED2, lightsOn);
-    digitalWrite(LED3, lightsOn);
-    digitalWrite(LED4, lightsOn);
-    lastBlink = millis();
-  }
-}
-
-void turnOffLights() {
-  digitalWrite(LED1, LOW);
-  digitalWrite(LED2, LOW);
-  digitalWrite(LED3, LOW);
-  digitalWrite(LED4, LOW);
-}
-
-void playBuzzer() {
-  static unsigned long lastTone = 0;
-  static bool toneOn = false;
-  
-  if (millis() - lastTone > 500) {
-    toneOn = !toneOn;
-    if (toneOn) {
-      tone(BUZZER, 1000);
-    } else {
-      noTone(BUZZER);
-    }
-    lastTone = millis();
-  }
 }
